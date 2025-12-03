@@ -1,6 +1,7 @@
 streamlit
 rdkit-pypi
+pubchempy
 pandas
 numpy
-
 pillow
+
