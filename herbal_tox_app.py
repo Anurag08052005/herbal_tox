@@ -1,13 +1,22 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from rdkit import Chem
-from rdkit.Chem import Descriptors, Lipinski, QED, Draw
+from rdkit import Chem, DataStructs
+from rdkit.Chem import Descriptors, Lipinski, QED, Draw, AllChem
+from rdkit.Chem.rdMolDescriptors import CalcTPSA
 from io import BytesIO
 import base64
+from stmol import showmol
+import py3Dmol
+import plotly.graph_objects as go
+from fpdf import FPDF
+import warnings
+
+# --- 0. SILENCE ALL WARNINGS (Clean Terminal) ---
+warnings.filterwarnings("ignore")
 
 # ==========================================
-# 1. CONFIGURATION & STYLING
+# 1. CONFIGURATION & AESTHETIC CSS
 # ==========================================
 st.set_page_config(
     page_title="Herbal-Tox | Ayurvedic ADMET AI",
@@ -16,32 +25,136 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for a "Medical/AI" look
+# --- LOAD GOOGLE FONTS & CUSTOM STYLING ---
 st.markdown("""
 <style>
-    .main {
-        background-color: #f5f7f9;
+    /* IMPORT FONTS */
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&family=Inter:wght@300;400;600&display=swap');
+
+    /* GLOBAL STYLES */
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif;
     }
-    .stButton>button {
-        background-color: #2E8B57;
+    
+    /* BACKGROUND GRADIENT */
+    .stApp {
+        background: linear-gradient(135deg, #fdfbf7 0%, #e8f5e9 100%);
+    }
+
+    /* HEADINGS */
+    h1, h2, h3 {
+        font-family: 'Poppins', sans-serif;
+        color: #1b4332; /* Dark Forest Green */
+        font-weight: 700;
+    }
+    
+    h1 {
+        font-size: 2.5rem !important;
+        text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+    }
+
+    /* --- SIDEBAR STYLING FIX --- */
+    section[data-testid="stSidebar"] {
+        background-color: #1b4332;
+    }
+    
+    /* Force ALL Text Color White in Sidebar */
+    section[data-testid="stSidebar"] .stMarkdown, 
+    section[data-testid="stSidebar"] h1, 
+    section[data-testid="stSidebar"] h2, 
+    section[data-testid="stSidebar"] h3, 
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] span,
+    section[data-testid="stSidebar"] div {
+        color: #ffffff !important; 
+    }
+
+    /* CARD STYLING FOR METRICS & RESULTS */
+    div[data-testid="stMetric"] {
+        background-color: white;
+        border-radius: 15px;
+        padding: 15px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        border: 1px solid #e0e0e0;
+        transition: transform 0.2s;
+    }
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-5px);
+        border-color: #2E8B57;
+    }
+    
+    /* Metric Label Fix */
+    div[data-testid="stMetric"] label {
+        color: #666 !important;
+    }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        color: #1b4332 !important;
+    }
+
+    /* LAYMAN BOX STYLING (EXPANDED) */
+    .layman-box {
+        background-color: #f1f8e9;
+        border-left: 5px solid #558b2f;
+        padding: 20px;
+        border-radius: 8px;
+        margin-top: 15px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+    }
+    .layman-item {
+        margin-bottom: 12px;
+        border-bottom: 1px solid #dcedc8;
+        padding-bottom: 8px;
+    }
+    .layman-title {
+        font-weight: bold;
+        color: #2e7d32;
+        font-family: 'Poppins', sans-serif;
+        font-size: 15px;
+    }
+    .layman-text {
+        color: #33691e;
+        font-size: 14px;
+        line-height: 1.5;
+    }
+    .overall-verdict {
+        background-color: #2e7d32;
         color: white;
-        border-radius: 10px;
+        padding: 10px;
+        border-radius: 8px;
+        text-align: center;
+        font-weight: bold;
+        margin-top: 10px;
+    }
+
+    /* BUTTON STYLING */
+    div.stButton > button {
+        background: linear-gradient(90deg, #2E8B57 0%, #40916c 100%);
+        color: white !important;
+        border: none;
+        border-radius: 12px;
+        padding: 12px 24px;
+        font-weight: 600;
+        font-family: 'Poppins', sans-serif;
+        box-shadow: 0 4px 14px rgba(46, 139, 87, 0.4);
         width: 100%;
     }
-    .stMetric {
-        background-color: white;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+    div.stButton > button:hover {
+        transform: scale(1.02);
     }
-    h1, h2, h3 {
-        color: #2E8B57;
+
+    /* INPUT FIELDS */
+    .stTextInput > div > div > input, .stSelectbox > div > div > div {
+        border-radius: 10px;
+        border: 1px solid #b7e4c7;
+        background-color: white;
+        color: black !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. AYURVEDIC KNOWLEDGE BASE (COMPLETE DB)
+# 2. KNOWLEDGE BASES
 # ==========================================
 HERB_DATABASE = {
     "Ashwagandha (Withania somnifera)": [
@@ -173,7 +286,7 @@ HERB_DATABASE = {
         {"name": "Cinnamyl alcohol", "smiles": "C1=CC=C(C=C1)C=CCO", "role": "Aromatic"}
     ],
     "Gandhak Rasayan (Sulfur compound)": [
-        {"name": "Sulfur (S₈ ring)", "smiles": "S1S2S3S4S5S6S7S1", "role": "Antimicrobial"},
+        {"name": "Sulfur (S8 ring)", "smiles": "S1S2S3S4S5S6S7S1", "role": "Antimicrobial"},
         {"name": "Hydrogen sulfide", "smiles": "S", "role": "Biochemical signaling molecule"}
     ],
     "Garlic (Allium sativum)": [
@@ -250,7 +363,7 @@ HERB_DATABASE = {
     ],
     "Amla (Phyllanthus emblica)": [
         {"name": "Gallic Acid", "smiles": "C1=CC(=C(C=C1O)O)C(=O)O", "role": "Antioxidant"},
-        {"name": "Ascorbic Acid", "smiles": "C(C1C(C(C(O1)O)O)=O)O", "role": "Immune support, Antioxidant"}
+        {"name": "Ascorbic Acid", "smiles": "C(C1C(C(C(O1)O)=O)O)O", "role": "Immune support, Antioxidant"}
     ],
     "Ginger (Zingiber officinale)": [
         {"name": "Gingerol", "smiles": "CCCCCC(=O)CC(C1=CC(=C(C=C1)O)O)O", "role": "Anti-inflammatory, Digestive"},
@@ -278,7 +391,7 @@ HERB_DATABASE = {
     ],
     "Ashoka (Saraca asoca)": [
         {"name": "Catechin", "smiles": "C1=CC(=C(C=C1C2C(C(C(O2)O)O)O)O)O", "role": "Astringent, Antioxidant"},
-        {"name": "Epicatechin", "smiles": "C1=CC(=C(C=C1C2C(C(C(O2)O)O)O)O)O", "role": "Antioxidant"}
+        {"name": "Epicatechin", "smiles": "C1=CC(=C(C=C1C2C(C(C(O2)O)O)O)O", "role": "Antioxidant"}
     ],
     "Haritaki (Terminalia chebula)": [
         {"name": "Chebulinic Acid", "smiles": "C1=CC(=C(C=C1O)O)C(=O)O", "role": "Digestive, Laxative"},
@@ -426,234 +539,487 @@ HERB_DATABASE = {
     ]
 }
 
+# 2B. FDA Reference Database
+FDA_DRUGS = {
+    "Aspirin": "CC(=O)OC1=CC=CC=C1C(=O)O",
+    "Paracetamol": "CC(=O)NC1=CC=C(O)C=C1",
+    "Ibuprofen": "CC(C)CC1=CC=C(C=C1)C(C)C(=O)O",
+    "Metformin": "CN(C)C(=N)NC(=N)N",
+    "Caffeine": "CN1C=NC2=C1C(=O)N(C(=O)N2C)C",
+    "Chloroquine": "CCN(CC)CCCC(C)NC1=C2C=CC(=CC2=NC=C1)Cl",
+    "Omeprazole": "CC1=CN=C(C(=C1OC)C)CS(=O)C2=NC3=C(N2)C=C(C=C3)OC",
+    "Warfarin": "CC(=O)CC(C1=CC=CC=C1)C2=C(C(=O)OC2=O)O",
+    "Morphine": "CN1CCC23C4C1CC5=C2C(=C(C=C5)O)OC3C(C=C4)O",
+    "Penicillin G": "CC1(C(N2C(S1)C(C2=O)NC(=O)CC3=CC=CC=C3)C(=O)O)C",
+    "Dopamine": "C1=CC(=C(C=C1CCN)O)O",
+    "Adrenaline": "CNCCC(C1=CC(=C(C=C1)O)O)O",
+    "Quinine": "COC1=CC2=C(C=CN=C2C=C1)C(C3CC4CCN3CC4C=C)O",
+    "Artemisinin (Standard)": "CC1CCC2C(C1)C(C3(C2O)OOC3)O",
+    "Diazepam": "CN1C(=O)CN=C(C2=C1C=CC(=C2)Cl)C3=CC=CC=C3",
+    "Lidocaine": "CCN(CC)CC(=O)NC1=C(C=CC=C1C)C"
+}
+
 # ==========================================
-# 3. BACKEND AI LOGIC (RDKit & Heuristics)
+# 3. BACKEND AI LOGIC & HEURISTICS
 # ==========================================
+
+# --- Rules and Heuristics Definitions ---
+LIPINSKI_RULES = {
+    "MW": (500, "<"),       # Molecular Weight < 500 Da
+    "LogP": (5, "<"),       # LogP < 5
+    "H_Donors": (5, "<"),   # H-Bond Donors < 5
+    "H_Acceptors": (10, "<")# H-Bond Acceptors < 10
+}
+
+# BBB Heuristic based on documentation: TPSA < 90 AND MW < 400
+BBB_TPSA_CUTOFF = 90
+BBB_MW_CUTOFF = 400
 
 def get_molecule_image(smiles):
-    """Generates a 2D image of the molecule from SMILES"""
     mol = Chem.MolFromSmiles(smiles)
-    if mol:
-        img = Draw.MolToImage(mol, size=(400, 300))
-        return img
+    if mol: return Draw.MolToImage(mol, size=(400, 300))
     return None
 
-def calculate_admet(smiles):
+def render_3d_molecule(smiles):
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        mol = Chem.AddHs(mol)
+        AllChem.EmbedMolecule(mol)
+        mblock = Chem.MolToMolBlock(mol)
+        view = py3Dmol.view(width=400, height=300)
+        view.addModel(mblock, 'mol')
+        view.setStyle({'stick': {}})
+        view.zoomTo()
+        showmol(view, height=300, width=400)
+    except: st.warning("3D Visualization Unavailable")
+
+def find_similar_drug(target_smiles):
+    target_mol = Chem.MolFromSmiles(target_smiles)
+    if not target_mol: return None, 0
+    
+    target_fp = AllChem.GetMorganFingerprintAsBitVect(target_mol, 2, nBits=1024)
+    best_score = 0
+    best_drug = "None"
+    
+    for drug_name, drug_smiles in FDA_DRUGS.items():
+        ref_mol = Chem.MolFromSmiles(drug_smiles)
+        if ref_mol:
+            ref_fp = AllChem.GetMorganFingerprintAsBitVect(ref_mol, 2, nBits=1024)
+            score = DataStructs.TanimotoSimilarity(target_fp, ref_fp)
+            if score > best_score:
+                best_score = score
+                best_drug = drug_name
+                
+    return best_drug, round(best_score * 100, 1)
+
+def get_layman_explanation(admet_data):
     """
-    Calculates real physicochemical properties using RDKit.
-    Acts as a 'Heuristic Model' for ADMET prediction.
+    Translates technical ADMET data into simple English descriptions across 5 categories.
     """
-    mol = Chem.MolFromSmiles(smiles)
-    if not mol:
+    explanations = {}
+    
+    # 1. DIGESTION & ABSORPTION (Based on Bioavailability)
+    if admet_data['Absorption'] == 'High':
+        explanations['Digestion'] = "✅ **Excellent Digestion:** Your body absorbs this herb easily. It doesn't require strong 'Agni' (digestive fire) to process."
+    else:
+        explanations['Digestion'] = "⚠️ **Heavy Digestibility:** This herb is hard to digest. It should be taken with warm water, ginger, or pepper to improve absorption."
+
+    # 2. METABOLISM (Based on LogP)
+    logp = admet_data['LogP']
+    if logp < 0:
+        explanations['Metabolism'] = "💧 **Fast Acting:** Dissolves in water quickly. It moves through your system fast and doesn't linger in the body."
+    elif 0 <= logp <= 3:
+        explanations['Metabolism'] = "⚖️ **Balanced:** The 'Goldilocks' zone. It stays in the body long enough to act effectively but is processed safely by the liver."
+    else:
+        explanations['Metabolism'] = "🧈 **Slow Release:** Dissolves in fat. It stays in your system for a long time. Best taken with Ghee or Milk to help transport it."
+
+    # 3. EXCRETION (Based on Solubility)
+    if logp < 2.5:
+        explanations['Excretion'] = "🚽 **Kidney Cleansing:** Mainly flushed out through urine. It likely has a diuretic effect (increases urination)."
+    else:
+        explanations['Excretion'] = "💩 **Bowel Cleansing:** Processed by the liver and removed via the intestines. It may have a mild laxative effect."
+
+    # 4. TOXICITY & SAFETY (Based on QED & Structure)
+    if "High" in admet_data['Toxicity_Risk']:
+        explanations['Toxicity'] = "⚠️ **Use Caution:** Our analysis detects structural alerts. High doses might stress the liver. Consult a Vaidya (Doctor) before long-term use."
+    else:
+        explanations['Toxicity'] = "🛡️ **Generally Safe:** This compound shows a safe chemical profile typical of non-toxic herbs. It is likely safe for daily consumption."
+
+    # 5. OVERALL VERDICT
+    violations = admet_data['Violations']
+    if violations == 0 and "High" not in admet_data['Toxicity_Risk']:
+        explanations['Verdict'] = "🌟 **EXCELLENT:** Safe, absorbable, and effective. Good for daily use."
+    elif violations <= 1:
+        explanations['Verdict'] = "✅ **GOOD:** Generally safe, but respect the dosage."
+    else:
+        explanations['Verdict'] = "🛑 **CAUTION:** Poor absorption or potential risks. Use only under guidance."
+
+    return explanations
+
+def plot_radar_chart(admet):
+    categories = ['Mol. Weight', 'LogP', 'H-Donors', 'H-Acceptors', 'TPSA']
+    values = [admet['MW']/500, max(0, admet['LogP'])/5, admet['H_Donors']/5, admet['H_Acceptors']/10, admet['TPSA']/140]
+    max_range = max(1.5, max(values) + 0.2)
+    values += [values[0]]
+    categories += [categories[0]]
+    
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(r=[1]*6, theta=categories, fill='toself', name='Safe Limit', line_color='#2E8B57', fillcolor='rgba(46, 139, 87, 0.2)'))
+    fig.add_trace(go.Scatterpolar(r=[max_range]*6, theta=categories, fill='tonext', name='Danger Zone', line_color='#e63946', fillcolor='rgba(230, 57, 70, 0.1)'))
+    fig.add_trace(go.Scatterpolar(r=values, theta=categories, fill='toself', name='Compound Profile', line=dict(color='#1d3557', width=3)))
+    
+    fig.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0, max_range], gridcolor="#e0e0e0")),
+        showlegend=True,
+        paper_bgcolor='rgba(0,0,0,0)', 
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family="Inter", size=12),
+        margin=dict(l=40, r=40, t=20, b=20)
+    )
+    return fig
+
+def create_pdf(results):
+    """Generates a PDF report from analysis results."""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    
+    # Professional Header
+    pdf.set_fill_color(46, 139, 87) # Green Header
+    pdf.set_text_color(255, 255, 255)
+    pdf.cell(0, 15, "Herbal-Tox: AI Safety Report", ln=True, align="C", fill=True)
+    pdf.ln(10)
+    pdf.set_text_color(0, 0, 0)
+
+    for item in results:
+        pdf.set_font("Arial", style="B", size=14)
+        pdf.set_text_color(46, 139, 87)
+        pdf.cell(0, 10, f"Compound: {item['Compound Name']}", ln=True)
+        pdf.set_text_color(0, 0, 0)
+        
+        pdf.set_font("Arial", size=11)
+        pdf.cell(0, 8, f"Role: {item['Role']}", ln=True)
+        pdf.cell(0, 8, f"SMILES: {item['Compound Name'][:40]}...", ln=True)
+        
+        pdf.set_fill_color(240, 248, 245) # Light green background for stats
+        pdf.ln(2)
+        pdf.cell(0, 8, f" Toxicity Risk: {item['Toxicity_Risk']}  |  Absorption: {item['Absorption']}", ln=True, fill=True)
+        pdf.cell(0, 8, f" Lipinski Violations: {item['Violations']}  |  FDA Match: {item['Similar_Drug']} ({item['Similarity_Score']}%)", ln=True, fill=True)
+        pdf.ln(5)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(5)
+
+    return pdf.output(dest="S").encode("latin-1")
+
+def calculate_physicochemical_properties(mol):
+    """Calculates key RDKit descriptors for a molecule."""
+    if mol is None:
         return None
     
-    # 1. Calculate Descriptors
-    mw = Descriptors.MolWt(mol)            # Molecular Weight
-    logp = Descriptors.MolLogP(mol)        # Lipophilicity (Solubility/Permeability)
-    tpsa = Descriptors.TPSA(mol)           # Topological Polar Surface Area (Absorption)
-    h_donors = Lipinski.NumHDonors(mol)
-    h_acceptors = Lipinski.NumHAcceptors(mol)
-    rotatable_bonds = Descriptors.NumRotatableBonds(mol)
-    qed_score = QED.qed(mol)              # Drug-likeness score (0-1)
+    props = {
+        "MW": Descriptors.MolWt(mol),
+        "LogP": Descriptors.MolLogP(mol),
+        "H_Donors": Descriptors.NumHDonors(mol),
+        "H_Acceptors": Descriptors.NumHAcceptors(mol),
+        "TPSA": CalcTPSA(mol)
+    }
+    return props
 
-    # 2. ADMET Rules (Heuristic "AI" Logic)
-    
-    # Absorption Rule (Lipinski Rule of 5)
-    # Poor absorption if: MW > 500, LogP > 5, H-Donors > 5, H-Acceptors > 10
+def check_lipinski_rule(props):
+    """Checks for Lipinski violations and predicts oral absorption."""
+    if props is None:
+        return {"Violations": "N/A", "Prediction": "Invalid Molecule"}
+        
     violations = 0
-    if mw > 500: violations += 1
-    if logp > 5: violations += 1
-    if h_donors > 5: violations += 1
-    if h_acceptors > 10: violations += 1
     
-    absorption_status = "High" if violations <= 1 else "Low"
-
-    # Blood Brain Barrier (BBB) Logic
-    # Usually crosses BBB if TPSA < 90 and MW < 400
-    bbb_penetration = "Likely" if (tpsa < 90 and mw < 400) else "Unlikely"
-
-    # Toxicity Flag (Simplistic simulation)
-    # In a real app, this would be: model.predict(fingerprints)
-    # Here we use QED as a proxy: Very low drug-likeness often correlates with issues
-    toxicity_risk = "Low" if qed_score > 0.4 else "Moderate/High (Check Structure)"
-
+    # Check each rule
+    for prop_name, (cutoff, rule_type) in LIPINSKI_RULES.items():
+        value = props.get(prop_name, np.inf if rule_type == '<' else np.NINF)
+        
+        is_violated = False
+        if rule_type == '<' and value >= cutoff:
+            is_violated = True
+        elif rule_type == '>' and value <= cutoff:
+            is_violated = True
+        
+        if is_violated:
+            violations += 1
+            
+    # Determine Absorption Prediction
+    prediction = "High Absorption" if violations <= 1 else "Low Absorption"
+    
     return {
-        "MW": round(mw, 2),
-        "LogP": round(logp, 2),
-        "TPSA": round(tpsa, 2),
-        "H_Donors": h_donors,
+        "Violations": violations,
+        "Prediction": prediction,
+        "Details": {k: props[k] for k in LIPINSKI_RULES.keys()}
+    }
+
+def predict_bbb_penetration(props):
+    """Predicts Blood-Brain Barrier (BBB) penetration using the TPSA/MW heuristic."""
+    if props is None:
+        return {"Prediction": "Invalid Molecule"}
+        
+    tpsa = props.get("TPSA", np.inf)
+    mw = props.get("MW", np.inf)
+    
+    # Heuristic: TPSA < 90 AND MW < 400
+    is_penetrator = (tpsa < BBB_TPSA_CUTOFF) and (mw < BBB_MW_CUTOFF)
+    
+    prediction = "Likely Penetrator" if is_penetrator else "Low Penetration/Efflux Risk"
+    
+    return {
+        "Prediction": prediction,
+        "TPSA": tpsa,
+        "MW": mw
+    }
+
+def generate_admet_report(smiles):
+    """Generates the full ADMET report for a given SMILES string."""
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return {"Status": "Error", "Message": "Invalid SMILES string provided."}
+    
+    props = calculate_physicochemical_properties(mol)
+    
+    lipinski_results = check_lipinski_rule(props)
+    bbb_results = predict_bbb_penetration(props)
+    
+    report = {
+        "SMILES": smiles,
+        "Molecular Properties": props,
+        "Lipinski Analysis (Oral Bioavailability)": lipinski_results,
+        "BBB Penetration Analysis (Heuristic)": bbb_results,
+        "Status": "Success"
+    }
+    return report
+
+def calculate_admet_wrapper(smiles):
+    """
+    Wrapper function to bridge the new logic with the existing UI components.
+    """
+    # 1. Run the new core logic
+    report = generate_admet_report(smiles)
+    if report["Status"] == "Error": return None
+
+    # 2. Extract Data
+    props = report["Molecular Properties"]
+    lipinski = report["Lipinski Analysis (Oral Bioavailability)"]
+    bbb = report["BBB Penetration Analysis (Heuristic)"]
+
+    # 3. Run extra features (FDA Match & QED for Toxicity Badge)
+    similar_drug, similarity_score = find_similar_drug(smiles)
+    
+    mol = Chem.MolFromSmiles(smiles)
+    qed_score = QED.qed(mol)
+    toxicity_risk = "Low" if qed_score > 0.4 else "High Risk (Hepatotoxic)"
+
+    # 4. Return flat dictionary expected by the UI
+    return {
+        "MW": round(props["MW"], 2), 
+        "LogP": round(props["LogP"], 2), 
+        "TPSA": round(props["TPSA"], 2),
+        "H_Donors": props["H_Donors"], 
+        "H_Acceptors": props["H_Acceptors"], 
         "QED": round(qed_score, 2),
-        "Absorption": absorption_status,
-        "BBB": bbb_penetration,
+        "Absorption": lipinski["Prediction"], 
+        "BBB": bbb["Prediction"], 
         "Toxicity_Risk": toxicity_risk,
-        "Violations": violations
+        "Violations": lipinski["Violations"],
+        "Similar_Drug": similar_drug, 
+        "Similarity_Score": similarity_score
     }
 
 # ==========================================
-# 4. FRONTEND UI (Streamlit)
+# 4. FRONTEND UI
 # ==========================================
 
 def home_page():
-    st.image("https://img.freepik.com/free-vector/science-laboratory-research-concept-illustration_114360-1033.jpg", width=700)
-    st.title("🌿 Herbal-Tox: AI for Ayurveda")
+    # Hero Section
     st.markdown("""
-    *Predict the Toxicity & Efficacy of Ancient Herbs using Modern AI.*
+    <div style="background-color: #d8f3dc; padding: 40px; border-radius: 20px; margin-bottom: 30px; text-align: center;">
+        <h1 style="color: #1b4332; margin-bottom: 10px;">Herbal-Tox AI 🌿</h1>
+        <h3 style="color: #40916c;">The Future of Safe Ayurvedic Medicine</h3>
+        <p style="font-size: 18px; color: #2d6a4f;">Bridging ancient wisdom with modern cheminformatics to predict safety & efficacy.</p>
+    </div>
+    """, unsafe_allow_html=True)
     
-    Ayurveda is powerful, but complex. Herbal-Tox helps researchers:
-    * *Deconstruct* herbs into their active phytochemicals.
-    * *Predict* ADMET properties (Absorption, Metabolism, Toxicity).
-    * *Visualize* chemical structures instantly.
-    """)
-    
-    st.info("👈 Select *'Run Analysis'* from the sidebar to start.")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.info("🧬 **Deconstruct Herbs**\n\nBreak down complex herbs into active phytochemicals automatically.")
+    with c2:
+        st.success("🛡️ **Predict Safety**\n\nAnalyze toxicity, bioavailability, and BBB penetration using FDA rules.")
+    with c3:
+        st.warning("⚗️ **Visual Chemistry**\n\nInteractive 3D molecular modeling and regulatory reporting.")
+
+    st.markdown("---")
+    st.image("https://img.freepik.com/free-vector/science-laboratory-research-concept-illustration_114360-1033.jpg", use_container_width=True)
 
 def analysis_page():
     st.title("🔬 Phytochemical ADMET Analyzer")
     
-    # Input Section
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        search_type = st.radio("Search Mode:", ["Select from Database", "Enter Custom SMILES"])
-        
-        if search_type == "Select from Database":
-            # --- SEARCH BAR ---
-            search_query = st.text_input("🔍 Search Database (Herb, Compound, or Role):", placeholder="Try 'Shilajit', 'Anti-cancer', or 'Curcumin'...")
-            
-            # Smart Filter Logic
-            filtered_herbs = []
-            if search_query:
-                for herb, comps in HERB_DATABASE.items():
-                    # Match Herb Name?
-                    if search_query.lower() in herb.lower():
-                        filtered_herbs.append(herb)
-                        continue
-                    
-                    # Match Compound Name or Role?
-                    for c in comps:
-                        if (search_query.lower() in c["name"].lower()) or (search_query.lower() in c.get("role", "").lower()):
-                            filtered_herbs.append(herb)
-                            break
-            else:
-                filtered_herbs = list(HERB_DATABASE.keys())
-
-            if not filtered_herbs:
-                st.warning("No matches found.")
-                selected_herb = None
-                compounds = []
-            else:
-                selected_herb = st.selectbox("Select Herb:", filtered_herbs)
+    # Styled Input Container
+    with st.container():
+        st.markdown('<div style="background-color: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">', unsafe_allow_html=True)
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            search_type = st.radio("Search Mode:", ["Select from Database", "Enter Custom SMILES"], horizontal=True)
+            if search_type == "Select from Database":
+                selected_herb = st.selectbox("Select Herb:", list(HERB_DATABASE.keys()))
                 compounds = HERB_DATABASE[selected_herb]
-                st.success(f"Loaded {len(compounds)} active compounds from *{selected_herb}*")
+                st.success(f"Loaded {len(compounds)} active compounds from **{selected_herb}**")
+            else:
+                custom_smiles = st.text_input("Enter SMILES String:", "CC(=O)OC1=CC=CC=C1C(=O)O")
+                compounds = [{"name": "Custom Input", "smiles": custom_smiles, "role": "User Defined"}]
+        with c2:
+            st.markdown("#### 💡 Quick Tip")
+            st.caption("Select a herb to auto-load its active ingredients, or paste a SMILES string to analyze a novel compound.")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        else:
-            custom_smiles = st.text_input("Enter SMILES String:", "CC(=O)OC1=CC=CC=C1C(=O)O")
-            compounds = [{"name": "Custom Input", "smiles": custom_smiles, "role": "User Defined"}]
-
-    with col2:
-        st.markdown("### How it works")
-        st.caption("""
-        1. *SMILES Parsing:* Converts text to chemical graph.
-        2. *RDKit Engine:* Calculates LogP, TPSA, MW.
-        3. *Safety Logic:* Applies Lipinski's Rule of 5 to flag toxicity risks.
-        """)
-
-    # Initialize storage for download
-    results_for_export = []
-
-    if st.button("🚀 Analyze Compounds"):
-        st.divider()
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    if st.button("🚀 Run AI Analysis"):
+        st.markdown("---")
+        results_for_export = []
         
-        if not compounds:
-            st.error("No compounds selected.")
-        else:
-            for cmp in compounds:
-                name = cmp["name"]
-                smiles = cmp["smiles"]
-                role = cmp.get("role", "N/A")
+        for i, cmp in enumerate(compounds):
+            name = cmp["name"]
+            smiles = cmp["smiles"]
+            # CALL THE NEW WRAPPER FUNCTION HERE
+            admet = calculate_admet_wrapper(smiles)
+            
+            if admet:
+                results_for_export.append({**admet, 'Compound Name': name, 'Role': cmp['role']})
                 
-                # Perform Backend Calculation
-                admet = calculate_admet(smiles)
+                # --- LAYMAN EXPLANATION GENERATION ---
+                explanations = get_layman_explanation(admet)
+                # -------------------------------------
                 
-                if admet:
-                    # Store data for export
-                    export_data = admet.copy()
-                    export_data['Compound Name'] = name
-                    export_data['Role'] = role
-                    results_for_export.append(export_data)
-
-                    # --- Result Card ---
-                    with st.container():
-                        st.subheader(f"🧪 {name}")
-                        st.markdown(f"*Role:* {role}")
-                        
-                        c1, c2, c3 = st.columns([1, 1, 2])
-                        
-                        with c1:
-                            img = get_molecule_image(smiles)
-                            st.image(img, caption="2D Structure", use_container_width=True)
-                            st.code(smiles, language='text')
-
-                        with c2:
-                            st.markdown("#### Physicochemical Profile")
-                            st.metric("Molecular Weight", f"{admet['MW']} Da")
-                            st.metric("Lipophilicity (LogP)", admet['LogP'])
-                            st.metric("Drug-Likeness (QED)", admet['QED'])
-
-                        with c3:
-                            st.markdown("#### ⚠ AI Safety Predictions")
-                            
-                            # Dynamic Badges
-                            tox_color = "red" if "High" in admet['Toxicity_Risk'] else "green"
-                            abs_color = "green" if admet['Absorption'] == "High" else "orange"
-                            
-                            st.markdown(f"*Toxicity Risk:* :{tox_color}[{admet['Toxicity_Risk']}]")
-                            st.markdown(f"*Oral Absorption:* :{abs_color}[{admet['Absorption']}]")
-                            st.markdown(f"*BBB Penetration:* {admet['BBB']}")
-                            
-                            st.progress(admet['QED'], text="Drug-Likeness Score")
-                            
-                            if admet['Violations'] > 0:
-                                st.warning(f"⚠ Lipinski Violations: {admet['Violations']} (Check solubility)")
-                            else:
-                                st.success("✅ Lipinski Rule Compliant (Good drug-like properties)")
+                # --- RESULT CARD ---
+                with st.container():
+                    st.markdown(f"""
+                    <div style="background-color: white; padding: 25px; border-radius: 15px; border-left: 5px solid #2E8B57; box-shadow: 0 4px 10px rgba(0,0,0,0.05); margin-bottom: 20px;">
+                        <h3 style="margin:0; color: #1b4332;">{i+1}. {name}</h3>
+                        <p style="color: #666; font-style: italic;">{cmp['role']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
                     
-                    st.divider()
+                    c1, c2, c3 = st.columns([1.2, 1.2, 1.5])
+                    
+                    with c1:
+                        st.markdown("**2D Structure**")
+                        img = get_molecule_image(smiles)
+                        st.image(img, use_container_width=True)
+                        with st.expander("🔄 View 3D Model"):
+                            render_3d_molecule(smiles)
 
-            # --- SAVE FUNCTIONALITY ---
-            if results_for_export:
-                st.markdown("### 📥 Save Results")
+                    with c2:
+                        st.markdown("**Safety Radar**")
+                        fig = plot_radar_chart(admet)
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    with c3:
+                        st.markdown("**AI Predictions**")
+                        
+                        # Custom Badges
+                        tox_bg = "#ffebee" if "High" in admet['Toxicity_Risk'] else "#e8f5e9"
+                        tox_col = "#c62828" if "High" in admet['Toxicity_Risk'] else "#2e7d32"
+                        
+                        # Fix logic for High Absorption (Good) vs Low (Bad)
+                        abs_bg = "#e8f5e9" if "High" in admet['Absorption'] else "#fff3e0"
+                        abs_col = "#2e7d32" if "High" in admet['Absorption'] else "#ef6c00"
+
+                        st.markdown(f"""
+                        <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                            <span style="background-color: {tox_bg}; color: {tox_col}; padding: 5px 10px; border-radius: 15px; font-weight: bold; font-size: 14px;">Toxicity: {admet['Toxicity_Risk']}</span>
+                            <span style="background-color: {abs_bg}; color: {abs_col}; padding: 5px 10px; border-radius: 15px; font-weight: bold; font-size: 14px;">Absorption: {admet['Absorption']}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        st.info(f"💊 **FDA Match:** {admet['Similar_Drug']} ({admet['Similarity_Score']}%)")
+                        
+                        col_a, col_b = st.columns(2)
+                        col_a.metric("Mol. Weight", f"{admet['MW']} Da")
+                        col_b.metric("Lipophilicity", admet['LogP'])
+                        
+                        if admet['Violations'] > 0:
+                            st.error(f"⚠ Lipinski Violations: {admet['Violations']}")
+                        else:
+                            st.success("✅ Lipinski Compliant")
+
+                    # --- NEW EXPANDED HEALTH IMPACT GUIDE SECTION ---
+                    st.markdown("### 📋 Health Impact Guide (Simple English)")
+                    st.markdown(f"""
+                    <div class="layman-box">
+                        <div class="layman-item">
+                            <div class="layman-title">1. Digestion & Absorption</div>
+                            <div class="layman-text">{explanations['Digestion']}</div>
+                        </div>
+                        <div class="layman-item">
+                            <div class="layman-title">2. Metabolism (Processing)</div>
+                            <div class="layman-text">{explanations['Metabolism']}</div>
+                        </div>
+                        <div class="layman-item">
+                            <div class="layman-title">3. Excretion (Removal)</div>
+                            <div class="layman-text">{explanations['Excretion']}</div>
+                        </div>
+                        <div class="layman-item">
+                            <div class="layman-title">4. Toxicity & Safety</div>
+                            <div class="layman-text">{explanations['Toxicity']}</div>
+                        </div>
+                        <div class="overall-verdict">
+                            OVERALL: {explanations['Verdict']}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    # ---------------------------------------
+
+        if results_for_export:
+            st.markdown("### 📥 Download Reports")
+            c1, c2 = st.columns(2)
+            with c1:
                 df = pd.DataFrame(results_for_export)
-                
-                # Reorder columns for better readability in Excel
-                cols = ['Compound Name', 'Role', 'Toxicity_Risk', 'Absorption', 'LogP', 'MW', 'QED', 'Violations']
-                # Add any extra columns that might be there
-                remaining_cols = [c for c in df.columns if c not in cols]
-                df = df[cols + remaining_cols]
+                # Ensure correct columns exist
+                cols = ['Compound Name', 'Role', 'Toxicity_Risk', 'Absorption', 'LogP', 'MW', 'Similar_Drug', 'Similarity_Score']
+                # Filter just in case
+                final_cols = [c for c in cols if c in df.columns]
+                remaining_cols = [c for c in df.columns if c not in final_cols]
+                df = df[final_cols + remaining_cols]
                 
                 csv = df.to_csv(index=False).encode('utf-8')
-                
-                st.download_button(
-                    label="📄 Download Report (CSV)",
-                    data=csv,
-                    file_name=f"{selected_herb.split(' ')[0]}_Analysis.csv" if search_type == "Select from Database" else "Custom_Analysis.csv",
-                    mime="text/csv",
-                )
+                st.download_button("📄 Download CSV Data", csv, "analysis.csv", "text/csv")
+            with c2:
+                pdf_bytes = create_pdf(results_for_export)
+                st.download_button("📕 Download Official PDF Report", data=pdf_bytes, file_name="HerbalTox_Report.pdf", mime="application/pdf")
 
-# ==========================================
-# 5. APP NAVIGATION
-# ==========================================
+def about_page():
+    st.title("About Herbal-Tox")
+    st.markdown("""
+    <div style="background-color: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.05);">
+        <h3 style="color: #2E8B57;">Bridging Ancient Ayurveda with Modern AI</h3>
+        <p>Unlike "Black-Box" AI models, <b>Herbal-Tox</b> uses explainable Cheminformatics algorithms (White-Box AI) to ensure safety in herbal medicine.</p>
+        <hr>
+        <h4>🧪 Methodology</h4>
+        <ul>
+            <li><b>Digitization (SMILES):</b> Converting raw chemical structures into machine-readable strings.</li>
+            <li><b>The Core Engine (RDKit):</b> Calculating molecular descriptors like LogP (Lipophilicity) and TPSA.</li>
+            <li><b>Safety Filters:</b> Applying Pfizer's <i>Lipinski's Rule of 5</i> to flag bioavailability issues.</li>
+            <li><b>Validation:</b> Cross-referencing against FDA databases using Tanimoto Similarity.</li>
+        </ul>
+        <br>
+        <small>Built for Hackathon 2025 by Team NovaX.</small>
+    </div>
+    """, unsafe_allow_html=True)
+
 def main():
-    st.sidebar.title("Herbal-Tox 🐍")
-    page = st.sidebar.radio("Navigate", ["Home", "Run Analysis", "About"])
-    
-    if page == "Home":
-        home_page()
-    elif page == "Run Analysis":
-        analysis_page()
-    elif page == "About":
-        st.title("About Project")
-        st.write("Built for Hackathon 2025. Uses RDKit for cheminformatics.")
+    with st.sidebar:
+        st.title("Herbal-Tox 🌿")
+        page = st.radio("Navigate", ["Home", "Run Analysis", "About"])
+        st.markdown("---")
+        st.caption("v1.0.0 | Hackathon Build")
+        
+    if page == "Home": home_page()
+    elif page == "Run Analysis": analysis_page()
+    elif page == "About": about_page()
 
 if __name__ == "__main__":
     main()
