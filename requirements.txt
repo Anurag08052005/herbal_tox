@@ -1,7 +1,8 @@
 streamlit
-rdkit-pypi
-pubchempy
 pandas
 numpy
-pillow
-
+rdkit
+stmol
+py3Dmol
+plotly
+fpdf
